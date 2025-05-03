@@ -1,0 +1,71 @@
+{
+  "clientId": "YOUR_CLIENT_ID_HERE",
+  "updateInterval": 10000,
+  "enableDetailedStats": true,
+  "enableSystemInfo": true,
+  "idleTimeout": 300000,
+  "priorityApps": [
+    {
+      "processName": "photoshop",
+      "type": "design",
+      "icon": "photoshop",
+      "details": "Editing in Photoshop"
+    },
+    {
+      "processName": "discord",
+      "type": "chat",
+      "icon": "discord",
+      "details": "Chatting on Discord"
+    },
+    {
+      "processName": "fortnite",
+      "type": "gaming",
+      "icon": "fortnite",
+      "details": "Playing Fortnite"
+    },
+    {
+      "processName": "steam",
+      "type": "gaming",
+      "icon": "steam",
+      "details": "Gaming on Steam"
+    },
+    {
+      "processName": "chrome",
+      "type": "browsing",
+      "icon": "chrome",
+      "details": "Browsing the Web"
+    },
+    {
+      "processName": "prism launcher",
+      "type": "gaming",
+      "icon": "minecraft",
+      "details": "Playing Minecraft"
+    },
+    {
+      "processName": "devenv",
+      "type": "coding",
+      "icon": "vs2022",
+      "details": "Developing in Visual Studio 2022"
+    },
+    {
+      "processName": "code - insiders",
+      "type": "coding",
+      "icon": "vscode-insiders",
+      "details": "Coding in VS Code Insiders"
+    },
+    {
+      "processName": "spotify",
+      "type": "music",
+      "icon": "spotify",
+      "details": "Listening to Music"
+    }
+  ],
+  "customApps": [
+    {
+      "processName": "obs",
+      "type": "streaming",
+      "icon": "obs",
+      "details": "Streaming/Recording"
+    }
+  ]
+}
