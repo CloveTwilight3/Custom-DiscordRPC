@@ -1,8 +1,8 @@
 # Discord Rich Presence Activity Tracker
 
-![GitHub Workflow Status](https://img.shields.io/github/workflow/status/clovetwilight3/discord-rpc-status/Build%20and%20Test)
-![License](https://img.shields.io/github/license/clovetwilight3/discord-rpc-status)
-![GitHub last commit](https://img.shields.io/github/last-commit/clovetwilight3/discord-rpc-status)
+![GitHub Workflow Status](https://img.shields.io/github/workflow/status/clovetwilight3/Custom-DiscordRPC/Build%20and%20Test)
+![License](https://img.shields.io/github/license/clovetwilight3/Custom-DiscordRPC)
+![GitHub last commit](https://img.shields.io/github/last-commit/clovetwilight3/Custom-DiscordRPC)
 
 This application automatically updates your Discord status with your current PC activity in real-time, showing what application you're using, how long you've been using it, and system metrics.
 

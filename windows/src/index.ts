@@ -1,6 +1,3 @@
-// Discord RPC Application for Windows
-// This application updates your Discord status based on system activity
-
 import { Client } from 'discord-rpc';
 import * as os from 'os';
 import * as process from 'process';
