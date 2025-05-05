@@ -1,57 +1,158 @@
 {
-  "clientId": "YOUR_CLIENT_ID_HERE",
+  "defaultClientId": "YOUR_NOW_CLIENT_ID",
   "updateInterval": 10000,
   "enableDetailedStats": true,
   "enableSystemInfo": true,
   "idleTimeout": 300000,
+  "applications": {
+    "games": {
+      "clientId": "YOUR_GAMES_CLIENT_ID",
+      "processNames": [
+        "VALORANT-Win64-Shipping", 
+        "FortniteClient-Win64-Shipping", 
+        "League of Legends",
+        "Minecraft", 
+        "steam",
+        "EpicGamesLauncher",
+        "Battle.net",
+        "csgo",
+        "DOTA2",
+        "Warzone",
+        "GTA5"
+      ]
+    },
+    "web": {
+      "clientId": "YOUR_WEB_CLIENT_ID",
+      "processNames": [
+        "chrome", 
+        "firefox", 
+        "msedge", 
+        "brave", 
+        "opera",
+        "safari"
+      ]
+    },
+    "messaging": {
+      "clientId": "YOUR_MESSAGING_CLIENT_ID",
+      "processNames": [
+        "discord", 
+        "slack", 
+        "teams", 
+        "zoom",
+        "skype",
+        "telegram",
+        "signal",
+        "whatsapp"
+      ]
+    },
+    "music": {
+      "clientId": "YOUR_MUSIC_CLIENT_ID",
+      "processNames": [
+        "spotify", 
+        "iTunes", 
+        "MusicBee", 
+        "vlc",
+        "winamp",
+        "foobar2000",
+        "AIMP"
+      ]
+    },
+    "code": {
+      "clientId": "YOUR_CODE_CLIENT_ID",
+      "processNames": [
+        "code", 
+        "devenv", 
+        "idea64", 
+        "pycharm64", 
+        "sublime_text", 
+        "notepad++",
+        "atom",
+        "eclipse",
+        "webstorm64",
+        "android studio"
+      ]
+    },
+    "creative": {
+      "clientId": "YOUR_CREATIVE_CLIENT_ID",
+      "processNames": [
+        "photoshop", 
+        "illustrator", 
+        "AfterFX", 
+        "PremierePro", 
+        "figma", 
+        "blender",
+        "gimp",
+        "krita",
+        "paintdotnet"
+      ]
+    }
+  },
   "priorityApps": [
     {
-      "processName": "photoshop",
-      "type": "design",
-      "icon": "photoshop",
-      "details": "Editing in Photoshop"
+      "processName": "VALORANT-Win64-Shipping",
+      "type": "games",
+      "icon": "valorant",
+      "details": "Playing VALORANT"
     },
     {
-      "processName": "discord",
-      "type": "chat",
-      "icon": "discord",
-      "details": "Chatting on Discord"
+      "processName": "League of Legends",
+      "type": "games",
+      "icon": "lol",
+      "details": "Playing League of Legends"
     },
     {
-      "processName": "fortnite",
-      "type": "gaming",
+      "processName": "FortniteClient-Win64-Shipping",
+      "type": "games",
       "icon": "fortnite",
       "details": "Playing Fortnite"
     },
     {
+      "processName": "photoshop",
+      "type": "creative",
+      "icon": "photoshop",
+      "details": "Editing in Photoshop"
+    },
+    {
+      "processName": "illustrator",
+      "type": "creative",
+      "icon": "illustrator",
+      "details": "Creating in Illustrator"
+    },
+    {
+      "processName": "discord",
+      "type": "messaging",
+      "icon": "discord",
+      "details": "Chatting on Discord"
+    },
+    {
+      "processName": "slack",
+      "type": "messaging",
+      "icon": "slack",
+      "details": "Messaging on Slack"
+    },
+    {
       "processName": "steam",
-      "type": "gaming",
+      "type": "games",
       "icon": "steam",
       "details": "Gaming on Steam"
     },
     {
       "processName": "chrome",
-      "type": "browsing",
+      "type": "web",
       "icon": "chrome",
       "details": "Browsing the Web"
     },
     {
-      "processName": "prism launcher",
-      "type": "gaming",
-      "icon": "minecraft",
-      "details": "Playing Minecraft"
+      "processName": "firefox",
+      "type": "web",
+      "icon": "firefox",
+      "details": "Browsing with Firefox"
     },
     {
-      "processName": "devenv",
-      "type": "coding",
-      "icon": "vs2022",
-      "details": "Developing in Visual Studio 2022"
-    },
-    {
-      "processName": "code - insiders",
-      "type": "coding",
-      "icon": "vscode-insiders",
-      "details": "Coding in VS Code Insiders"
+      "processName": "code",
+      "type": "code",
+      "icon": "vscode",
+      "details": "Coding in VS Code"
     },
     {
       "processName": "spotify",
@@ -63,7 +164,7 @@
   "customApps": [
     {
       "processName": "obs",
-      "type": "streaming",
+      "type": "creative",
       "icon": "obs",
       "details": "Streaming/Recording"
     }

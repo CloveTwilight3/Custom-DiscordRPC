@@ -5,20 +5,34 @@ import * as childProcess from 'child_process';
 
 // Config options
 interface AppConfig {
-  clientId: string;
-  updateInterval: number; // in ms
+  defaultClientId: string;
+  updateInterval: number;
   enableDetailedStats: boolean;
   enableSystemInfo: boolean;
-  idleTimeout: number; // in ms
+  idleTimeout: number;
+  applications: {
+    [key: string]: {
+      clientId: string;
+      processNames: string[];
+    }
+  };
 }
 
-// Default configuration - Edit these values or create a config.json file
+// Default configuration (will be overridden by config.json)
 const defaultConfig: AppConfig = {
-  clientId: 'YOUR_CLIENT_ID_HERE', // You'll need to create one at https://discord.com/developers/applications
-  updateInterval: 10000, // 10 seconds
+  defaultClientId: '', // Will be filled from config.json
+  updateInterval: 10000,
   enableDetailedStats: true,
   enableSystemInfo: true,
-  idleTimeout: 300000 // 5 minutes
+  idleTimeout: 300000,
+  applications: {
+    games: { clientId: '', processNames: [] },
+    web: { clientId: '', processNames: [] },
+    messaging: { clientId: '', processNames: [] },
+    music: { clientId: '', processNames: [] },
+    code: { clientId: '', processNames: [] },
+    creative: { clientId: '', processNames: [] }
+  }
 };
 
 // Try to load config from file, fall back to default
@@ -29,23 +43,24 @@ try {
     config = { ...defaultConfig, ...JSON.parse(configFile) };
     console.log('Loaded configuration from config.json');
   } else {
-    config = defaultConfig;
-    console.log('Using default configuration');
-    // Create a default config file for future use
-    fs.writeFileSync('./config.json', JSON.stringify(defaultConfig, null, 2));
-    console.log('Created default config.json file');
+    console.error('config.json not found! Please create it first.');
+    process.exit(1);
   }
 } catch (error) {
-  console.error('Error loading config, using defaults:', error);
-  config = defaultConfig;
+  console.error('Error loading config:', error);
+  process.exit(1);
 }
 
 // Read priority apps from config
 const priorityApps = (config as any).priorityApps || [];
 const customApps = (config as any).customApps || [];
 
-// Initialize Discord RPC client
-const client = new Client({ transport: 'ipc' });
+// Keep track of the current client
+let currentClientId: string = config.defaultClientId;
+let client = new Client({ transport: 'ipc' });
+let clientConnected = false;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
 
 // Interface for activity data
 interface ActivityData {
@@ -63,44 +78,16 @@ interface ActivityData {
 // Activity tracking class
 class ActivityTracker {
   private lastActivity: string = '';
-  private lastProcessName: string = ''; // Track the last process name to detect app changes
+  private lastProcessName: string = '';
+  private lastAppType: string = '';
   private startTime: number = Date.now();
   private activityTimers: Map<string, number> = new Map();
   private dailyActivityStats: Map<string, number> = new Map();
   
   // Get current active application
-  public async getCurrentActivity(): Promise<ActivityData> {
+  public async getCurrentActivity(): Promise<{activity: ActivityData, appType: string, processName: string}> {
     try {
-      // DEBUGGING: List all windows
-      const listAllWindowsCommand = 'powershell.exe "Get-Process | Where-Object {$_.MainWindowTitle -ne \'\'} | Select-Object MainWindowTitle, ProcessName | ConvertTo-Json"';
-      let allWindowsResult;
-      try {
-        allWindowsResult = childProcess.execSync(listAllWindowsCommand).toString();
-      } catch (e) {
-        console.error('Error running PowerShell command for window listing:', e);
-        allWindowsResult = '[]';
-      }
-
-      // Parse all windows
-      let allWindows;
-      try {
-        allWindows = JSON.parse(allWindowsResult);
-        if (!Array.isArray(allWindows)) {
-          allWindows = [allWindows];
-        }
-        
-        // Log all detected windows for debugging
-        console.log('\nAll detected windows:');
-        allWindows.forEach((window, index) => {
-          console.log(`Window ${index + 1}: "${window.MainWindowTitle}" - Process: ${window.ProcessName}`);
-        });
-        console.log('-----------------------------------');
-      } catch (e) {
-        console.error('Error parsing windows list:', e);
-      }
-
-      // =========== IMPROVED ACTIVE WINDOW DETECTION ===========
-      // This uses a PowerShell script that leverages the Win32 API to get the actual foreground window
+      // Use PowerShell to get the foreground window details
       const foregroundWindowScript = `
       Add-Type @"
         using System;
@@ -152,7 +139,6 @@ class ActivityTracker {
       let result;
       try {
         result = childProcess.execSync(activeWindowCommand).toString().trim();
-        console.log("Raw active window result:", result);
         
         // Clean up the temporary script file
         try {
@@ -188,7 +174,19 @@ class ActivityTracker {
       const windowTitle = activeWindow.MainWindowTitle || "Unknown";
       const processName = activeWindow.ProcessName || "Unknown";
       
-      console.log("Active window detected:", windowTitle, "Process:", processName);
+      console.log(`Active window detected: "${windowTitle}" - Process: ${processName}`);
+      
+      // Determine which application category this belongs to
+      let appType = 'default';
+      for (const [type, app] of Object.entries(config.applications)) {
+        if (app.processNames.some(p => 
+          processName.toLowerCase().includes(p.toLowerCase()) || 
+          windowTitle.toLowerCase().includes(p.toLowerCase())
+        )) {
+          appType = type;
+          break;
+        }
+      }
       
       // Basic activity detection logic
       let activityType = 'app';
@@ -211,68 +209,49 @@ class ActivityTracker {
           
           // Special handling for specific apps
           if (app.processName.toLowerCase().includes('spotify')) {
-            // Try to extract song name from Spotify
-            // Spotify window title format: "Song Name - Artist - Spotify"
+            // Try to extract song name from Spotify window title
             const songMatch = windowTitle.match(/(.+?) - (.+?) - Spotify/);
             if (songMatch) {
               const song = songMatch[1].trim();
               const artist = songMatch[2].trim();
               state = `${song} by ${artist}`;
               
-              // If we have a song, update the details too
               if (song && artist) {
                 details = `Listening to Music`;
               }
-            } else {
-              // Alternative pattern: sometimes it's just "Spotify"
-              // or "Spotify Premium" when not playing
-              if (windowTitle.trim() === 'Spotify' || 
-                  windowTitle.includes('Spotify Premium')) {
-                state = 'Browsing Music';
-                details = 'Using Spotify';
-              }
+            } else if (windowTitle.trim() === 'Spotify' || windowTitle.includes('Spotify Premium')) {
+              state = 'Browsing Music';
+              details = 'Using Spotify';
             }
           } else if (app.processName.toLowerCase().includes('discord')) {
             // For Discord, try to show channel or DM
             if (windowTitle.includes(' - ')) {
               const parts = windowTitle.split(' - ');
-              if (parts.length >= 2) {
-                // Most likely format is "channel - server - Discord"
-                if (parts.length >= 3) {
-                  state = `In #${parts[0]} on ${parts[1]}`;
-                } else {
-                  state = `Chatting in ${parts[0]}`;
-                }
+              if (parts.length >= 3) {
+                state = `In #${parts[0]} on ${parts[1]}`;
+              } else if (parts.length >= 2) {
+                state = `Chatting in ${parts[0]}`;
               }
             } else if (windowTitle.toLowerCase().includes('direct')) {
               state = 'In Direct Messages';
             }
-          } else if (app.processName.toLowerCase().includes('steam')) {
-            // For Steam, try to extract the game name
-            if (windowTitle.includes(' - ')) {
-              const parts = windowTitle.split(' - ');
-              if (parts.length >= 2 && parts[parts.length - 1].toLowerCase().includes('steam')) {
-                // Format is often "Game Name - Steam"
-                state = `Playing ${parts[0]}`;
-                details = `Gaming on Steam`;
-              }
-            } else if (windowTitle.toLowerCase().includes('store')) {
-              state = 'Browsing the Store';
-            } else if (windowTitle.toLowerCase().includes('library')) {
-              state = 'Browsing Library';
-            } else if (windowTitle.toLowerCase().includes('community')) {
-              state = 'Browsing Community';
-            } else if (windowTitle.toLowerCase() === 'steam') {
-              state = 'In Steam Client';
+          } else if (app.processName.toLowerCase().includes('valorant') || 
+                     processName.toLowerCase() === 'VALORANT-Win64-Shipping') {
+            // Special handling for VALORANT
+            details = 'Playing VALORANT';
+            if (windowTitle.toLowerCase().includes('lobby')) {
+              state = 'In Lobby';
+            } else if (windowTitle.toLowerCase().includes('match')) {
+              state = 'In a Match';
+            } else {
+              state = 'In Game';
             }
           } else if (app.processName.toLowerCase().includes('chrome')) {
             // For Chrome, extract the website
-            // Chrome title format is typically "Page Title - Website - Google Chrome"
             const chromeMatch = windowTitle.match(/(.+) - ([^-]+) - Google Chrome$/);
             if (chromeMatch) {
               state = `On ${chromeMatch[2].trim()}`;
             } else {
-              // Sometimes it's just "Website - Google Chrome"
               const simpleMatch = windowTitle.match(/(.+) - Google Chrome$/);
               if (simpleMatch) {
                 state = `On ${simpleMatch[1].trim()}`;
@@ -282,7 +261,6 @@ class ActivityTracker {
             // Special cases for common websites
             if (windowTitle.toLowerCase().includes('youtube')) {
               details = 'Watching YouTube';
-              largeImageKey = 'youtube';
               
               // Try to extract video title
               const ytMatch = windowTitle.match(/(.+) - YouTube/);
@@ -291,31 +269,10 @@ class ActivityTracker {
               }
             } else if (windowTitle.toLowerCase().includes('twitch')) {
               details = 'Watching Twitch';
-              largeImageKey = 'twitch';
-            } else if (windowTitle.toLowerCase().includes('github')) {
-              details = 'Working on GitHub';
-              largeImageKey = 'github';
             }
-          } else if (app.processName.toLowerCase().includes('fortnite')) {
-            state = 'Battle Royale';
-            if (windowTitle.toLowerCase().includes('lobby')) {
-              state = 'In Lobby';
-            } else if (windowTitle.toLowerCase().includes('battle')) {
-              state = 'In Battle';
-            }
-          } else if (app.processName.toLowerCase().includes('minecraft') || 
-                      app.processName.toLowerCase().includes('prism')) {
-            if (windowTitle.toLowerCase().includes('server')) {
-              const serverMatch = windowTitle.match(/server:?\s*([^-]+)/i);
-              if (serverMatch) {
-                state = `On server: ${serverMatch[1].trim()}`;
-              }
-            } else {
-              state = 'Playing Minecraft';
-            }
-          } else if (app.processName.toLowerCase().includes('code')) {
+          } else if (app.processName.toLowerCase() === 'code') {
             // For VS Code, extract file type
-            const fileMatch = windowTitle.match(/\.([^.]+)$/);
+            const fileMatch = windowTitle.match(/\.([^.]+) -/);
             if (fileMatch) {
               const extension = fileMatch[1].toLowerCase();
               const langMap: Record<string, string> = {
@@ -346,17 +303,7 @@ class ActivityTracker {
               windowTitle.toLowerCase().includes(app.processName.toLowerCase())) {
             activityType = app.type;
             largeImageKey = app.icon;
-            
-            // Special handling for ApplicationFrameHost
-            if (processName.toLowerCase() === 'applicationframehost') {
-              // For ApplicationFrameHost, we can extract the actual app name from the window title
-              // The window title is usually just the app name for modern Windows apps
-              const appName = windowTitle.split(' - ')[0] || windowTitle;
-              details = `Using ${appName}`;
-            } else {
-              details = app.details;
-            }
-            
+            details = app.details;
             state = windowTitle;
             matchedApp = true;
             break;
@@ -364,157 +311,51 @@ class ActivityTracker {
         }
       }
 
-      // Common applications mapping for process name detection
-      if (!matchedApp) {
-        const appMap: Record<string, {type: string, icon: string, details: string}> = {
-          // Browsers - Use chrome icon for all browsers
-          'chrome': {type: 'browsing', icon: 'chrome', details: 'Browsing with Chrome'},
-          'firefox': {type: 'browsing', icon: 'windows', details: 'Browsing with Firefox'},
-          'edge': {type: 'browsing', icon: 'windows', details: 'Browsing with Edge'},
-          'brave': {type: 'browsing', icon: 'windows', details: 'Browsing with Brave'},
-          'opera': {type: 'browsing', icon: 'windows', details: 'Browsing with Opera'},
-          
-          // Development - Use vscode icon for coding
-          'code': {type: 'coding', icon: 'vscode', details: 'Coding in VS Code'},
-          'visual studio': {type: 'coding', icon: 'vscode', details: 'Developing in Visual Studio'},
-          'intellij': {type: 'coding', icon: 'vscode', details: 'Coding in IntelliJ'},
-          'pycharm': {type: 'coding', icon: 'vscode', details: 'Coding in PyCharm'},
-          'android studio': {type: 'coding', icon: 'vscode', details: 'Android Development'},
-          'sublime': {type: 'coding', icon: 'vscode', details: 'Coding in Sublime'},
-          'notepad++': {type: 'coding', icon: 'vscode', details: 'Editing in Notepad++'},
-          
-          // Productivity - Use windows icon for these
-          'word': {type: 'writing', icon: 'windows', details: 'Writing in Word'},
-          'excel': {type: 'spreadsheet', icon: 'windows', details: 'Working in Excel'},
-          'powerpoint': {type: 'presentation', icon: 'windows', details: 'Creating a Presentation'},
-          'outlook': {type: 'email', icon: 'windows', details: 'Checking Email'},
-          'onenote': {type: 'notes', icon: 'windows', details: 'Taking Notes'},
-          'teams': {type: 'meeting', icon: 'windows', details: 'In a Meeting'},
-          'slack': {type: 'chat', icon: 'windows', details: 'Chatting on Slack'},
-          'discord': {type: 'chat', icon: 'discord', details: 'Chatting on Discord'},
-          'zoom': {type: 'meeting', icon: 'windows', details: 'In a Zoom Meeting'},
-          
-          // Creative - Use windows icon for creative apps
-          'photoshop': {type: 'design', icon: 'windows', details: 'Editing in Photoshop'},
-          'illustrator': {type: 'design', icon: 'windows', details: 'Designing in Illustrator'},
-          'premiere': {type: 'video', icon: 'windows', details: 'Editing Video'},
-          'aftereffects': {type: 'video', icon: 'windows', details: 'Creating Motion Graphics'},
-          'figma': {type: 'design', icon: 'windows', details: 'Designing in Figma'},
-          'blender': {type: '3d', icon: 'windows', details: '3D Modeling'},
-          'unity': {type: 'gamedev', icon: 'windows', details: 'Game Development'},
-          'unreal': {type: 'gamedev', icon: 'windows', details: 'Game Development'},
-          
-          // Games & Gaming Platforms - Use windows icon for gaming
-          'steam': {type: 'gaming', icon: 'windows', details: 'Gaming on Steam'},
-          'epicgames': {type: 'gaming', icon: 'windows', details: 'Gaming on Epic'},
-          'battle.net': {type: 'gaming', icon: 'windows', details: 'Gaming on Battle.net'},
-          'league': {type: 'gaming', icon: 'windows', details: 'Playing League of Legends'},
-          'valorant': {type: 'gaming', icon: 'windows', details: 'Playing Valorant'},
-          'minecraft': {type: 'gaming', icon: 'windows', details: 'Playing Minecraft'},
-          'fortnite': {type: 'gaming', icon: 'windows', details: 'Playing Fortnite'},
-          
-          // Media
-          'spotify': {type: 'music', icon: 'spotify', details: 'Listening to Music'},
-          'netflix': {type: 'watching', icon: 'windows', details: 'Watching Netflix'},
-          'vlc': {type: 'media', icon: 'windows', details: 'Watching Media'},
-          'youtube': {type: 'watching', icon: 'windows', details: 'Watching YouTube'},
-          'twitch': {type: 'watching', icon: 'windows', details: 'Watching Twitch'}
-        };
+      // Game-specific detection logic
+      if (processName === 'VALORANT-Win64-Shipping') {
+        appType = 'games';
+        activityType = 'games';
+        largeImageKey = 'valorant';
+        details = 'Playing VALORANT';
         
-        // Try to match by process name
-        for (const [appKey, appInfo] of Object.entries(appMap)) {
-          if (processName.toLowerCase().includes(appKey.toLowerCase())) {
-            activityType = appInfo.type;
-            largeImageKey = appInfo.icon;
-            details = appInfo.details;
-            matchedApp = true;
-            break;
-          }
+        if (windowTitle.toLowerCase().includes('lobby')) {
+          state = 'In Lobby';
+        } else {
+          state = 'In Game';
         }
+        matchedApp = true;
       }
       
-      // Override specific cases where the detection isn't working correctly
-      if (processName === 'Code') {
-        details = 'Coding in VS Code';
-        activityType = 'coding';
-        largeImageKey = 'vscode';
-        
-        // For VS Code, extract file type from window title
-        const fileMatch = windowTitle.match(/\.([^.]+) -/);
-        if (fileMatch) {
-          const extension = fileMatch[1].toLowerCase();
-          const langMap: Record<string, string> = {
-            'js': 'JavaScript',
-            'ts': 'TypeScript',
-            'py': 'Python',
-            'java': 'Java',
-            'cpp': 'C++',
-            'cs': 'C#',
-            'html': 'HTML',
-            'css': 'CSS',
-            'php': 'PHP'
-          };
-          
-          const language = langMap[extension] || extension;
-          state = `Coding in ${language}`;
-        }
-      } else if (processName === 'chrome') {
-        details = 'Browsing with Chrome';
-        activityType = 'browsing';
-        largeImageKey = 'chrome';
-        
-        // For Chrome, extract the website
-        if (windowTitle.includes(' - Google Chrome')) {
-          const website = windowTitle.replace(' - Google Chrome', '');
-          state = website;
-          
-          // Special cases for common websites (use standard icon for these)
-          if (windowTitle.toLowerCase().includes('youtube')) {
-            details = 'Watching YouTube';
-            largeImageKey = 'windows'; // Using windows icon for YouTube
-            
-            // Try to extract video title
-            const ytMatch = windowTitle.match(/(.+) - YouTube/);
-            if (ytMatch) {
-              state = `Watching: ${ytMatch[1].trim()}`;
-            }
-          } else if (windowTitle.toLowerCase().includes('twitch')) {
-            details = 'Watching Twitch';
-            largeImageKey = 'windows'; // Using windows icon for Twitch
-          } else if (windowTitle.toLowerCase().includes('github')) {
-            details = 'Working on GitHub';
-            largeImageKey = 'windows'; // Using windows icon for GitHub
-          }
-        }
-      } else if (processName === 'Discord') {
-        details = 'Chatting on Discord';
-        activityType = 'chat';
-        largeImageKey = 'discord';
-        
-        // Discord status is already handled well in the main detection code
-      } else if (processName === 'Spotify') {
-        details = 'Listening to Music';
-        activityType = 'music';
-        largeImageKey = 'spotify';
-        
-        // Spotify status is already handled well in the main detection code
-      } else if (!matchedApp) {
-        // Default to Windows icon for any unmatched applications
+      // If no app matched, use a generic default
+      if (!matchedApp) {
         largeImageKey = 'windows';
       }
       
-      // Always add the process name to the state for debugging
-      state = `${state} (${processName})`;
-      
-      // Track activity timing
-      this.trackActivityTime(activityType);
+      // Update app type if we have a specific match but no app type
+      if (appType === 'default' && activityType !== 'app') {
+        // Map the activity type to an app type
+        const activityToAppType: Record<string, string> = {
+          'gaming': 'games',
+          'music': 'music',
+          'coding': 'code',
+          'browsing': 'web',
+          'chat': 'messaging',
+          'design': 'creative',
+          'streaming': 'creative'
+        };
+        
+        if (activityToAppType[activityType]) {
+          appType = activityToAppType[activityType];
+        }
+      }
       
       // Reset the start time if the application changed
-      // This is the key fix - we check if the process changed
-      if (processName !== this.lastProcessName) {
+      if (processName !== this.lastProcessName || appType !== this.lastAppType) {
         console.log(`Application changed from ${this.lastProcessName} to ${processName}`);
+        console.log(`App type changed from ${this.lastAppType} to ${appType}`);
         this.startTime = Date.now();
         this.lastProcessName = processName;
+        this.lastAppType = appType;
       }
       
       // Only reset the activity type if it changed
@@ -526,40 +367,57 @@ class ActivityTracker {
       const activityDuration = Date.now() - this.startTime;
       const formattedDuration = this.formatDuration(activityDuration);
       
-      // Get system info for additional details
-      const cpuUsage = this.getCpuUsage();
-      const memoryUsage = this.getMemoryUsage();
+      // Track activity timing
+      this.trackActivityTime(activityType);
       
-      return {
-        details: details.substring(0, 128), // Discord has character limits
-        state: `${state.substring(0, 60)} | ${formattedDuration} | CPU: ${cpuUsage}%, RAM: ${memoryUsage}%`,
+      // Format state based on settings
+      let formattedState = state;
+      if (config.enableDetailedStats) {
+        formattedState = `${state.substring(0, 60)} | ${formattedDuration}`;
+        
+        // Add system info if enabled
+        if (config.enableSystemInfo) {
+          const cpuUsage = this.getCpuUsage();
+          const memoryUsage = this.getMemoryUsage();
+          formattedState += ` | CPU: ${cpuUsage}%, RAM: ${memoryUsage}%`;
+        }
+      }
+      
+      // Create activity data
+      const activity: ActivityData = {
+        details: details.substring(0, 128),
+        state: formattedState.substring(0, 128),
         largeImageKey,
         largeImageText: `${activityType.charAt(0).toUpperCase() + activityType.slice(1)} for ${formattedDuration}`,
         smallImageKey: 'info',
         smallImageText: `${os.hostname()} | Today: ${this.formatDuration((this.dailyActivityStats.get(activityType) || 0) * 1000)}`,
-        startTimestamp: this.startTime,
-        buttons: [
-          {
-            label: 'Activity Stats',
-            url: 'https://discord.com'
-          }
-        ]
+        startTimestamp: this.startTime
+      };
+      
+      return {
+        activity,
+        appType,
+        processName
       };
     } catch (error) {
       console.error('Error detecting activity:', error);
       
       // Return default activity on error
       return {
-        details: 'Online',
-        state: 'Using Windows',
-        largeImageKey: 'windows',
-        largeImageText: `Windows ${os.release()}`,
-        startTimestamp: this.startTime
+        activity: {
+          details: 'Online',
+          state: 'Using Windows',
+          largeImageKey: 'windows',
+          largeImageText: `Windows ${os.release()}`,
+          startTimestamp: this.startTime
+        },
+        appType: 'default',
+        processName: 'explorer'
       };
     }
   }
   
-  // Get CPU usage (simplified)
+  // Helper functions
   private getCpuUsage(): number {
     const cpus = os.cpus();
     let totalIdle = 0;
@@ -576,7 +434,6 @@ class ActivityTracker {
     return usage;
   }
   
-  // Get RAM usage
   private getMemoryUsage(): number {
     const totalMem = os.totalmem();
     const freeMem = os.freemem();
@@ -585,7 +442,6 @@ class ActivityTracker {
     return memUsage;
   }
   
-  // Format duration in a human-readable way
   private formatDuration(milliseconds: number): string {
     const seconds = Math.floor(milliseconds / 1000);
     const minutes = Math.floor(seconds / 60);
@@ -600,7 +456,6 @@ class ActivityTracker {
     }
   }
   
-  // Track time spent on activities
   private trackActivityTime(activityType: string): void {
     const now = Date.now();
     
@@ -619,20 +474,38 @@ class ActivityTracker {
 class DiscordRPCApp {
   private activityTracker: ActivityTracker;
   private updateInterval: NodeJS.Timeout | null = null;
+  private switchTimeout: NodeJS.Timeout | null = null;
+  private lastSwitchTime: number = 0;
+  private isReconnecting: boolean = false;
   
   constructor() {
     this.activityTracker = new ActivityTracker();
-    
-    // Set up event handlers
+    this.setupClientEventHandlers();
+  }
+  
+  // Set up event handlers for the RPC client
+  private setupClientEventHandlers(): void {
     client.on('ready', () => {
-      console.log('Discord RPC connected!');
+      console.log(`Discord RPC connected with client ID: ${currentClientId}`);
+      clientConnected = true;
+      reconnectAttempts = 0;
       this.startActivityTracking();
     });
     
-    // Handle connection errors
     client.on('error', (error) => {
       console.error('Discord RPC error:', error);
-      this.reconnect();
+      clientConnected = false;
+      if (!this.isReconnecting) {
+        this.reconnect();
+      }
+    });
+    
+    client.on('disconnected', () => {
+      console.log('Discord RPC disconnected');
+      clientConnected = false;
+      if (!this.isReconnecting) {
+        this.reconnect();
+      }
     });
   }
   
@@ -640,19 +513,91 @@ class DiscordRPCApp {
   public async start(): Promise<void> {
     try {
       console.log('Starting Discord RPC application...');
-      await client.login({ clientId: config.clientId });
+      console.log(`Default Client ID: ${config.defaultClientId}`);
+      
+      // Print available application types
+      console.log('Available application types:');
+      for (const [type, app] of Object.entries(config.applications)) {
+        console.log(`- ${type}: ${app.clientId}`);
+      }
+      
+      // Connect with the default client ID
+      await client.login({ clientId: config.defaultClientId });
+      currentClientId = config.defaultClientId;
     } catch (error) {
       console.error('Failed to connect to Discord:', error);
       this.reconnect();
     }
   }
   
-  // Reconnect logic
+  // Reconnect logic with exponential backoff
   private reconnect(): void {
-    console.log('Attempting to reconnect in 15 seconds...');
+    if (this.isReconnecting) return;
+    
+    this.isReconnecting = true;
+    reconnectAttempts++;
+    
+    // Calculate backoff time (exponential backoff with max of 2 minutes)
+    const backoffTime = Math.min(15000 * Math.pow(1.5, reconnectAttempts - 1), 120000);
+    
+    console.log(`Attempting to reconnect in ${backoffTime/1000} seconds... (Attempt ${reconnectAttempts})`);
+    
     setTimeout(() => {
+      this.isReconnecting = false;
       this.start();
-    }, 15000);
+    }, backoffTime);
+  }
+  
+  // Function to switch to a different Discord application with debouncing
+  private async switchClient(newClientId: string): Promise<boolean> {
+    if (newClientId === currentClientId && clientConnected) {
+      return true; // Already using the correct client
+    }
+    
+    // Check if we're switching too frequently
+    const now = Date.now();
+    if (now - this.lastSwitchTime < 15000) { // Don't switch more than once every 15 seconds
+      console.log(`Delaying app switch - last switch was ${(now - this.lastSwitchTime) / 1000} seconds ago`);
+      return false;
+    }
+    
+    // Clear any pending switch timeout
+    if (this.switchTimeout) {
+      clearTimeout(this.switchTimeout);
+    }
+    
+    // Debounce the switch (wait 3 seconds to avoid too frequent switching)
+    return new Promise((resolve) => {
+      this.switchTimeout = setTimeout(async () => {
+        console.log(`Switching from ${currentClientId} to ${newClientId}`);
+        
+        try {
+          // Destroy the current client
+          if (clientConnected) {
+            try {
+              await client.destroy();
+            } catch (e) {
+              console.error('Error destroying client:', e);
+            }
+            clientConnected = false;
+          }
+          
+          // Create a new client
+          client = new Client({ transport: 'ipc' });
+          this.setupClientEventHandlers();
+          
+          // Connect with the new client ID
+          await client.login({ clientId: newClientId });
+          currentClientId = newClientId;
+          this.lastSwitchTime = Date.now();
+          
+          resolve(true);
+        } catch (error) {
+          console.error('Error switching clients:', error);
+          resolve(false);
+        }
+      }, 3000);
+    });
   }
   
   // Start tracking and updating activity
@@ -661,14 +606,35 @@ class DiscordRPCApp {
       clearInterval(this.updateInterval);
     }
     
-    // Update activity based on config interval for responsive updates
+    // Update activity based on config interval
     this.updateInterval = setInterval(async () => {
       try {
-        const activity = await this.activityTracker.getCurrentActivity();
+        // Get current activity and appropriate client
+        const { activity, appType, processName } = await this.activityTracker.getCurrentActivity();
         
-        // Set the activity
-        client.setActivity(activity);
-        console.log('Activity updated:', activity.details, activity.state);
+        // Determine which client ID to use
+        let clientId = config.defaultClientId;
+        if (config.applications[appType]) {
+          clientId = config.applications[appType].clientId;
+        }
+        
+        // Switch client if necessary
+        if (clientId !== currentClientId) {
+          console.log(`Detected activity change to ${appType}. Preparing to switch client...`);
+          this.switchClient(clientId).then((switched) => {
+            if (!switched) {
+              console.log('Delaying client switch to avoid rate limits');
+            }
+          });
+        }
+        
+        // Set the activity if we're connected
+        if (clientConnected) {
+          client.setActivity(activity);
+          console.log(`Activity updated for ${appType}:`, activity.details, activity.state);
+        } else {
+          console.log('Client not connected, waiting for reconnect...');
+        }
       } catch (error) {
         console.error('Error updating activity:', error);
       }
@@ -684,6 +650,11 @@ class DiscordRPCApp {
       this.updateInterval = null;
     }
     
+    if (this.switchTimeout) {
+      clearTimeout(this.switchTimeout);
+      this.switchTimeout = null;
+    }
+    
     client.destroy();
     console.log('Discord RPC application stopped.');
   }
@@ -693,6 +664,17 @@ class DiscordRPCApp {
 const app = new DiscordRPCApp();
 app.start();
 
-// Output message for environments without signal handlers
-console.log('Process signal handlers not available in this environment.');
-console.log('Close this window to stop the application.');
+// Handle process signals
+process.on('SIGINT', () => {
+  console.log('Received SIGINT, shutting down...');
+  app.stop();
+  process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+  console.log('Received SIGTERM, shutting down...');
+  app.stop();
+  process.exit(0);
+});
+
+console.log('Discord Multi-App RPC running. Press Ctrl+C to exit.');
