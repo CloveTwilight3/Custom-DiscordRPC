@@ -1,8 +1,6 @@
 import { Client } from 'discord-rpc';
 import * as os from 'os';
-import * as process from 'process';
 import * as fs from 'fs';
-import * as path from 'path';
 import * as childProcess from 'child_process';
 
 // Config options
@@ -65,6 +63,7 @@ interface ActivityData {
 // Activity tracking class
 class ActivityTracker {
   private lastActivity: string = '';
+  private lastProcessName: string = ''; // Track the last process name to detect app changes
   private startTime: number = Date.now();
   private activityTimers: Map<string, number> = new Map();
   private dailyActivityStats: Map<string, number> = new Map();
@@ -72,20 +71,124 @@ class ActivityTracker {
   // Get current active application
   public async getCurrentActivity(): Promise<ActivityData> {
     try {
-      // Windows-specific code to get active window title
-      const activeWindowCommand = 'powershell.exe "Get-Process | Where-Object {$_.MainWindowTitle -ne \'\'} | Select-Object MainWindowTitle, ProcessName | ConvertTo-Json"';
-      const result = childProcess.execSync(activeWindowCommand).toString();
+      // DEBUGGING: List all windows
+      const listAllWindowsCommand = 'powershell.exe "Get-Process | Where-Object {$_.MainWindowTitle -ne \'\'} | Select-Object MainWindowTitle, ProcessName | ConvertTo-Json"';
+      let allWindowsResult;
+      try {
+        allWindowsResult = childProcess.execSync(listAllWindowsCommand).toString();
+      } catch (e) {
+        console.error('Error running PowerShell command for window listing:', e);
+        allWindowsResult = '[]';
+      }
+
+      // Parse all windows
+      let allWindows;
+      try {
+        allWindows = JSON.parse(allWindowsResult);
+        if (!Array.isArray(allWindows)) {
+          allWindows = [allWindows];
+        }
+        
+        // Log all detected windows for debugging
+        console.log('\nAll detected windows:');
+        allWindows.forEach((window, index) => {
+          console.log(`Window ${index + 1}: "${window.MainWindowTitle}" - Process: ${window.ProcessName}`);
+        });
+        console.log('-----------------------------------');
+      } catch (e) {
+        console.error('Error parsing windows list:', e);
+      }
+
+      // =========== IMPROVED ACTIVE WINDOW DETECTION ===========
+      // This uses a PowerShell script that leverages the Win32 API to get the actual foreground window
+      const foregroundWindowScript = `
+      Add-Type @"
+        using System;
+        using System.Runtime.InteropServices;
+        using System.Text;
+        public class ForegroundWindow {
+            [DllImport("user32.dll")]
+            public static extern IntPtr GetForegroundWindow();
+
+            [DllImport("user32.dll")]
+            public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+
+            [DllImport("user32.dll", SetLastError=true)]
+            public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+        }
+"@
+
+      $hwnd = [ForegroundWindow]::GetForegroundWindow()
+      $processId = 0
+      [ForegroundWindow]::GetWindowThreadProcessId($hwnd, [ref]$processId) | Out-Null
+
+      $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+
+      $windowText = New-Object System.Text.StringBuilder 256
+      [ForegroundWindow]::GetWindowText($hwnd, $windowText, 256) | Out-Null
+
+      if ($process) {
+          $output = @{
+              MainWindowTitle = $windowText.ToString()
+              ProcessName = $process.ProcessName
+          } | ConvertTo-Json
+          Write-Output $output
+      } else {
+          $output = @{
+              MainWindowTitle = $windowText.ToString()
+              ProcessName = "Unknown"
+          } | ConvertTo-Json
+          Write-Output $output
+      }
+      `;
+
+      // Save the script to a temporary file
+      const scriptPath = './temp_window_script.ps1';
+      fs.writeFileSync(scriptPath, foregroundWindowScript);
+
+      // Execute the script to get the actual foreground window
+      const activeWindowCommand = `powershell.exe -File "${scriptPath}"`;
       
-      // Parse the JSON result
-      const windowsInfo = JSON.parse(result);
+      let result;
+      try {
+        result = childProcess.execSync(activeWindowCommand).toString().trim();
+        console.log("Raw active window result:", result);
+        
+        // Clean up the temporary script file
+        try {
+          fs.unlinkSync(scriptPath);
+        } catch (e) {
+          console.error("Error removing temporary script file:", e);
+        }
+      } catch (e) {
+        console.error('Error running PowerShell script for active window:', e);
+        
+        // Try to clean up even if there was an error
+        try {
+          fs.unlinkSync(scriptPath);
+        } catch (cleanupError) {
+          console.error("Error removing temporary script file:", cleanupError);
+        }
+        
+        result = '{"MainWindowTitle":"Unknown Window","ProcessName":"Unknown"}';
+      }
       
-      // Find the most likely active window (this is a simplification)
-      const activeWindow = Array.isArray(windowsInfo) 
-        ? windowsInfo[0] 
-        : windowsInfo;
+      // Parse the result
+      let activeWindow;
+      try {
+        activeWindow = JSON.parse(result);
+      } catch (e) {
+        console.log("JSON parsing failed, using raw result");
+        activeWindow = {
+          MainWindowTitle: "Unknown Window",
+          ProcessName: "Unknown"
+        };
+      }
       
-      const windowTitle = activeWindow.MainWindowTitle;
-      const processName = activeWindow.ProcessName;
+      const windowTitle = activeWindow.MainWindowTitle || "Unknown";
+      const processName = activeWindow.ProcessName || "Unknown";
+      
+      console.log("Active window detected:", windowTitle, "Process:", processName);
       
       // Basic activity detection logic
       let activityType = 'app';
@@ -201,7 +304,7 @@ class ActivityTracker {
               state = 'In Battle';
             }
           } else if (app.processName.toLowerCase().includes('minecraft') || 
-                     app.processName.toLowerCase().includes('prism')) {
+                      app.processName.toLowerCase().includes('prism')) {
             if (windowTitle.toLowerCase().includes('server')) {
               const serverMatch = windowTitle.match(/server:?\s*([^-]+)/i);
               if (serverMatch) {
@@ -243,93 +346,179 @@ class ActivityTracker {
               windowTitle.toLowerCase().includes(app.processName.toLowerCase())) {
             activityType = app.type;
             largeImageKey = app.icon;
-            details = app.details;
+            
+            // Special handling for ApplicationFrameHost
+            if (processName.toLowerCase() === 'applicationframehost') {
+              // For ApplicationFrameHost, we can extract the actual app name from the window title
+              // The window title is usually just the app name for modern Windows apps
+              const appName = windowTitle.split(' - ')[0] || windowTitle;
+              details = `Using ${appName}`;
+            } else {
+              details = app.details;
+            }
+            
             state = windowTitle;
             matchedApp = true;
             break;
           }
         }
       }
-      
-      // If still no match, use the common applications mapping
+
+      // Common applications mapping for process name detection
       if (!matchedApp) {
-        // Common applications mapping
         const appMap: Record<string, {type: string, icon: string, details: string}> = {
-          // Browsers
+          // Browsers - Use chrome icon for all browsers
           'chrome': {type: 'browsing', icon: 'chrome', details: 'Browsing with Chrome'},
-          'firefox': {type: 'browsing', icon: 'firefox', details: 'Browsing with Firefox'},
-          'edge': {type: 'browsing', icon: 'edge', details: 'Browsing with Edge'},
-          'brave': {type: 'browsing', icon: 'brave', details: 'Browsing with Brave'},
-          'opera': {type: 'browsing', icon: 'opera', details: 'Browsing with Opera'},
+          'firefox': {type: 'browsing', icon: 'windows', details: 'Browsing with Firefox'},
+          'edge': {type: 'browsing', icon: 'windows', details: 'Browsing with Edge'},
+          'brave': {type: 'browsing', icon: 'windows', details: 'Browsing with Brave'},
+          'opera': {type: 'browsing', icon: 'windows', details: 'Browsing with Opera'},
           
-          // Development
+          // Development - Use vscode icon for coding
           'code': {type: 'coding', icon: 'vscode', details: 'Coding in VS Code'},
-          'visual studio': {type: 'coding', icon: 'vs', details: 'Developing in Visual Studio'},
-          'intellij': {type: 'coding', icon: 'intellij', details: 'Coding in IntelliJ'},
-          'pycharm': {type: 'coding', icon: 'pycharm', details: 'Coding in PyCharm'},
-          'android studio': {type: 'coding', icon: 'android', details: 'Android Development'},
-          'sublime': {type: 'coding', icon: 'sublime', details: 'Coding in Sublime'},
-          'notepad++': {type: 'coding', icon: 'notepad', details: 'Editing in Notepad++'},
+          'visual studio': {type: 'coding', icon: 'vscode', details: 'Developing in Visual Studio'},
+          'intellij': {type: 'coding', icon: 'vscode', details: 'Coding in IntelliJ'},
+          'pycharm': {type: 'coding', icon: 'vscode', details: 'Coding in PyCharm'},
+          'android studio': {type: 'coding', icon: 'vscode', details: 'Android Development'},
+          'sublime': {type: 'coding', icon: 'vscode', details: 'Coding in Sublime'},
+          'notepad++': {type: 'coding', icon: 'vscode', details: 'Editing in Notepad++'},
           
-          // Productivity
-          'word': {type: 'writing', icon: 'word', details: 'Writing in Word'},
-          'excel': {type: 'spreadsheet', icon: 'excel', details: 'Working in Excel'},
-          'powerpoint': {type: 'presentation', icon: 'powerpoint', details: 'Creating a Presentation'},
-          'outlook': {type: 'email', icon: 'outlook', details: 'Checking Email'},
-          'onenote': {type: 'notes', icon: 'onenote', details: 'Taking Notes'},
-          'teams': {type: 'meeting', icon: 'teams', details: 'In a Meeting'},
-          'slack': {type: 'chat', icon: 'slack', details: 'Chatting on Slack'},
+          // Productivity - Use windows icon for these
+          'word': {type: 'writing', icon: 'windows', details: 'Writing in Word'},
+          'excel': {type: 'spreadsheet', icon: 'windows', details: 'Working in Excel'},
+          'powerpoint': {type: 'presentation', icon: 'windows', details: 'Creating a Presentation'},
+          'outlook': {type: 'email', icon: 'windows', details: 'Checking Email'},
+          'onenote': {type: 'notes', icon: 'windows', details: 'Taking Notes'},
+          'teams': {type: 'meeting', icon: 'windows', details: 'In a Meeting'},
+          'slack': {type: 'chat', icon: 'windows', details: 'Chatting on Slack'},
           'discord': {type: 'chat', icon: 'discord', details: 'Chatting on Discord'},
-          'zoom': {type: 'meeting', icon: 'zoom', details: 'In a Zoom Meeting'},
+          'zoom': {type: 'meeting', icon: 'windows', details: 'In a Zoom Meeting'},
           
-          // Creative
-          'photoshop': {type: 'design', icon: 'photoshop', details: 'Editing in Photoshop'},
-          'illustrator': {type: 'design', icon: 'illustrator', details: 'Designing in Illustrator'},
-          'premiere': {type: 'video', icon: 'premiere', details: 'Editing Video'},
-          'aftereffects': {type: 'video', icon: 'aftereffects', details: 'Creating Motion Graphics'},
-          'figma': {type: 'design', icon: 'figma', details: 'Designing in Figma'},
-          'blender': {type: '3d', icon: 'blender', details: '3D Modeling'},
-          'unity': {type: 'gamedev', icon: 'unity', details: 'Game Development'},
-          'unreal': {type: 'gamedev', icon: 'unreal', details: 'Game Development'},
+          // Creative - Use windows icon for creative apps
+          'photoshop': {type: 'design', icon: 'windows', details: 'Editing in Photoshop'},
+          'illustrator': {type: 'design', icon: 'windows', details: 'Designing in Illustrator'},
+          'premiere': {type: 'video', icon: 'windows', details: 'Editing Video'},
+          'aftereffects': {type: 'video', icon: 'windows', details: 'Creating Motion Graphics'},
+          'figma': {type: 'design', icon: 'windows', details: 'Designing in Figma'},
+          'blender': {type: '3d', icon: 'windows', details: '3D Modeling'},
+          'unity': {type: 'gamedev', icon: 'windows', details: 'Game Development'},
+          'unreal': {type: 'gamedev', icon: 'windows', details: 'Game Development'},
           
-          // Games & Gaming Platforms
-          'steam': {type: 'gaming', icon: 'steam', details: 'Gaming on Steam'},
-          'epicgames': {type: 'gaming', icon: 'epic', details: 'Gaming on Epic'},
-          'battle.net': {type: 'gaming', icon: 'battlenet', details: 'Gaming on Battle.net'},
-          'league': {type: 'gaming', icon: 'league', details: 'Playing League of Legends'},
-          'valorant': {type: 'gaming', icon: 'valorant', details: 'Playing Valorant'},
-          'minecraft': {type: 'gaming', icon: 'minecraft', details: 'Playing Minecraft'},
-          'fortnite': {type: 'gaming', icon: 'fortnite', details: 'Playing Fortnite'},
+          // Games & Gaming Platforms - Use windows icon for gaming
+          'steam': {type: 'gaming', icon: 'windows', details: 'Gaming on Steam'},
+          'epicgames': {type: 'gaming', icon: 'windows', details: 'Gaming on Epic'},
+          'battle.net': {type: 'gaming', icon: 'windows', details: 'Gaming on Battle.net'},
+          'league': {type: 'gaming', icon: 'windows', details: 'Playing League of Legends'},
+          'valorant': {type: 'gaming', icon: 'windows', details: 'Playing Valorant'},
+          'minecraft': {type: 'gaming', icon: 'windows', details: 'Playing Minecraft'},
+          'fortnite': {type: 'gaming', icon: 'windows', details: 'Playing Fortnite'},
           
           // Media
           'spotify': {type: 'music', icon: 'spotify', details: 'Listening to Music'},
-          'netflix': {type: 'watching', icon: 'netflix', details: 'Watching Netflix'},
-          'vlc': {type: 'media', icon: 'vlc', details: 'Watching Media'},
-          'youtube': {type: 'watching', icon: 'youtube', details: 'Watching YouTube'},
-          'twitch': {type: 'watching', icon: 'twitch', details: 'Watching Twitch'}
+          'netflix': {type: 'watching', icon: 'windows', details: 'Watching Netflix'},
+          'vlc': {type: 'media', icon: 'windows', details: 'Watching Media'},
+          'youtube': {type: 'watching', icon: 'windows', details: 'Watching YouTube'},
+          'twitch': {type: 'watching', icon: 'windows', details: 'Watching Twitch'}
         };
-      
-        // If no specific app was matched, use default detection
-        if (windowTitle.toLowerCase().includes('youtube') || 
-            windowTitle.toLowerCase().includes('netflix') ||
-            windowTitle.toLowerCase().includes('prime video')) {
-          activityType = 'watching';
-          largeImageKey = 'video';
-          details = 'Watching Videos';
-        } else if (windowTitle.toLowerCase().includes('game') ||
-                  windowTitle.toLowerCase().includes('playing')) {
-          activityType = 'gaming';
-          largeImageKey = 'game';
-          details = 'Gaming';
+        
+        // Try to match by process name
+        for (const [appKey, appInfo] of Object.entries(appMap)) {
+          if (processName.toLowerCase().includes(appKey.toLowerCase())) {
+            activityType = appInfo.type;
+            largeImageKey = appInfo.icon;
+            details = appInfo.details;
+            matchedApp = true;
+            break;
+          }
         }
       }
+      
+      // Override specific cases where the detection isn't working correctly
+      if (processName === 'Code') {
+        details = 'Coding in VS Code';
+        activityType = 'coding';
+        largeImageKey = 'vscode';
+        
+        // For VS Code, extract file type from window title
+        const fileMatch = windowTitle.match(/\.([^.]+) -/);
+        if (fileMatch) {
+          const extension = fileMatch[1].toLowerCase();
+          const langMap: Record<string, string> = {
+            'js': 'JavaScript',
+            'ts': 'TypeScript',
+            'py': 'Python',
+            'java': 'Java',
+            'cpp': 'C++',
+            'cs': 'C#',
+            'html': 'HTML',
+            'css': 'CSS',
+            'php': 'PHP'
+          };
+          
+          const language = langMap[extension] || extension;
+          state = `Coding in ${language}`;
+        }
+      } else if (processName === 'chrome') {
+        details = 'Browsing with Chrome';
+        activityType = 'browsing';
+        largeImageKey = 'chrome';
+        
+        // For Chrome, extract the website
+        if (windowTitle.includes(' - Google Chrome')) {
+          const website = windowTitle.replace(' - Google Chrome', '');
+          state = website;
+          
+          // Special cases for common websites (use standard icon for these)
+          if (windowTitle.toLowerCase().includes('youtube')) {
+            details = 'Watching YouTube';
+            largeImageKey = 'windows'; // Using windows icon for YouTube
+            
+            // Try to extract video title
+            const ytMatch = windowTitle.match(/(.+) - YouTube/);
+            if (ytMatch) {
+              state = `Watching: ${ytMatch[1].trim()}`;
+            }
+          } else if (windowTitle.toLowerCase().includes('twitch')) {
+            details = 'Watching Twitch';
+            largeImageKey = 'windows'; // Using windows icon for Twitch
+          } else if (windowTitle.toLowerCase().includes('github')) {
+            details = 'Working on GitHub';
+            largeImageKey = 'windows'; // Using windows icon for GitHub
+          }
+        }
+      } else if (processName === 'Discord') {
+        details = 'Chatting on Discord';
+        activityType = 'chat';
+        largeImageKey = 'discord';
+        
+        // Discord status is already handled well in the main detection code
+      } else if (processName === 'Spotify') {
+        details = 'Listening to Music';
+        activityType = 'music';
+        largeImageKey = 'spotify';
+        
+        // Spotify status is already handled well in the main detection code
+      } else if (!matchedApp) {
+        // Default to Windows icon for any unmatched applications
+        largeImageKey = 'windows';
+      }
+      
+      // Always add the process name to the state for debugging
+      state = `${state} (${processName})`;
       
       // Track activity timing
       this.trackActivityTime(activityType);
       
-      // Only reset the start time if the activity type changed
-      if (activityType !== this.lastActivity) {
+      // Reset the start time if the application changed
+      // This is the key fix - we check if the process changed
+      if (processName !== this.lastProcessName) {
+        console.log(`Application changed from ${this.lastProcessName} to ${processName}`);
         this.startTime = Date.now();
+        this.lastProcessName = processName;
+      }
+      
+      // Only reset the activity type if it changed
+      if (activityType !== this.lastActivity) {
         this.lastActivity = activityType;
       }
       
@@ -504,9 +693,6 @@ class DiscordRPCApp {
 const app = new DiscordRPCApp();
 app.start();
 
-// Handle graceful shutdown
-process.on('SIGINT', () => {
-  console.log('Shutting down...');
-  app.stop();
-  process.exit(0);
-});
+// Output message for environments without signal handlers
+console.log('Process signal handlers not available in this environment.');
+console.log('Close this window to stop the application.');
