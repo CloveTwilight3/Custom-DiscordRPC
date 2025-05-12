@@ -1,6 +1,5 @@
 # Discord Rich Presence Activity Tracker
 
-![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/clovetwilight3/Custom-DiscordRPC/test.yml?branch=main)
 ![License](https://img.shields.io/github/license/clovetwilight3/Custom-DiscordRPC)
 ![GitHub last commit](https://img.shields.io/github/last-commit/clovetwilight3/Custom-DiscordRPC)
 
